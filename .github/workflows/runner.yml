@@ -175,6 +175,7 @@ jobs:
               --data-urlencode "autoinit=1" \
               --data-urlencode "target_path=$(dirname "${REMOTE_PATH}")" \
               --data-urlencode "block_list=${BLOCK_LIST}" \
+              --data-urlencode "jsToken=${TERABOX_JSTOKEN}" \
               --data-urlencode "app_id=250528" \
               --data-urlencode "web=1" \
               --data-urlencode "channel=dubox" \
