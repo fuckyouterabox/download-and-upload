@@ -1,0 +1,144 @@
+```yaml
+name: Download and Upload to TeraBox
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: "URL HTTP/HTTPS del archivo que se desea descargar"
+        required: true
+        type: string
+
+      remote_path:
+        description: "Ruta de destino en TeraBox, por ejemplo /usuarios/admin"
+        required: true
+        type: string
+
+jobs:
+  upload-to-terabox:
+    name: Download and upload file
+    runs-on: ubuntu-latest
+
+    env:
+      TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}
+
+    steps:
+      - name: Install aria2
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update
+          sudo apt-get install -y aria2
+
+          aria2c --version
+
+      - name: Check inputs
+        shell: bash
+        run: |
+          set -e
+
+          if [[ -z "${TERABOX_COOKIE}" ]]; then
+            echo "::error::El secret TERABOX_COOKIE no está configurado."
+            exit 1
+          fi
+
+          if [[ -z "${{ inputs.download_url }}" ]]; then
+            echo "::error::No se proporcionó una URL de descarga."
+            exit 1
+          fi
+
+          if [[ -z "${{ inputs.remote_path }}" ]]; then
+            echo "::error::No se proporcionó una ruta remota."
+            exit 1
+          fi
+
+      - name: Download TeraBox CLI
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p temptbc
+
+          curl -fL \
+            "https://github.com/fuckyouterabox/tbc-revived/releases/download/v0.1.2/tbc_Linux_x86_64.tar.gz" \
+            -o temptbc/tbc_Linux_x86_64.tar.gz
+
+      - name: Extract TeraBox CLI archive
+        shell: bash
+        run: |
+          set -e
+
+          tar -xzf temptbc/tbc_Linux_x86_64.tar.gz \
+            -C temptbc
+
+      - name: Extract TeraBox CLI tar
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p temptbcdecompressed
+
+          tar -xf temptbc/tbc_Linux_x86_64.tar \
+            -C temptbcdecompressed
+
+      - name: Copy tbc binary to root
+        shell: bash
+        run: |
+          set -e
+
+          cp temptbcdecompressed/tbc ./tbc
+          chmod +x ./tbc
+
+          echo "TeraBox CLI:"
+          ./tbc --help
+
+      - name: Download requested file with aria2
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p downloaded
+
+          URL="${{ inputs.download_url }}"
+
+          FILE_NAME="$(basename "${URL%%\?*}")"
+
+          if [[ -z "${FILE_NAME}" || "${FILE_NAME}" == "/" || "${FILE_NAME}" == "." ]]; then
+            echo "::error::No se pudo determinar el nombre del archivo desde la URL."
+            exit 1
+          fi
+
+          echo "Descargando: ${URL}"
+          echo "Archivo: ${FILE_NAME}"
+
+          aria2c \
+            -x 4 \
+            -s 4 \
+            --dir=downloaded \
+            --out="${FILE_NAME}" \
+            "${URL}"
+
+          echo "DOWNLOADED_FILE=downloaded/${FILE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Upload file to TeraBox
+        shell: bash
+        run: |
+          set -e
+
+          echo "Archivo local: ${DOWNLOADED_FILE}"
+          echo "Destino remoto: ${{ inputs.remote_path }}"
+
+          ./tbc put \
+            "${DOWNLOADED_FILE}" \
+            "${{ inputs.remote_path }}"
+
+      - name: Show result
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Upload completed successfully"
+          echo "File: ${DOWNLOADED_FILE}"
+          echo "Remote path: ${{ inputs.remote_path }}"
+          echo "========================================"
+```
