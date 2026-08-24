@@ -20,17 +20,17 @@ jobs:
       - name: Install aria2
         shell: bash
         run: |
-          set -e
+          set -ex
 
-          sudo apt-get update
-          sudo apt-get install -y aria2
+          sudo apt-get update -y
+          sudo apt-get install -y -V aria2
 
           aria2c --version
 
       - name: Check inputs
         shell: bash
         run: |
-          set -e
+          set -ex
 
           if [[ -z "${TERABOX_COOKIE}" ]]; then
             echo "::error::El secret TERABOX_COOKIE no está configurado."
@@ -45,34 +45,40 @@ jobs:
       - name: Download TeraBox CLI
         shell: bash
         run: |
-          set -e
-          mkdir -p temptbc
-          curl -fL \
+          set -ex
+          mkdir -pv temptbc
+          
+          # -v fuerza a curl a mostrar todo el intercambio de headers y redirecciones
+          curl -fL -v \
             "https://github.com/fuckyouterabox/tbc-revived/releases/download/v0.1.3/tbc_Linux_x86_64.tar.gz" \
             -o temptbc/tbc_Linux_x86_64.tar.gz
 
       - name: Extract TeraBox CLI archive
         shell: bash
         run: |
-          set -e
-          tar -xzf temptbc/tbc_Linux_x86_64.tar.gz -C temptbc
+          set -ex
+          
+          # Añadida la 'v' (verbose) al comando tar para listar los archivos extraídos
+          tar -xzvf temptbc/tbc_Linux_x86_64.tar.gz -C temptbc
 
       - name: Copy tbc binary to root
         shell: bash
         run: |
-          set -e
-          # Copy directly from temptbc, no second extraction needed
-          cp temptbc/tbc ./tbc
-          chmod +x ./tbc
+          set -ex
+          
+          # Copia y permisos con bandera verbose (-v)
+          cp -v temptbc/tbc ./tbc
+          chmod -v +x ./tbc
+          
           echo "TeraBox CLI:"
           ./tbc --help
 
       - name: Download requested file with aria2
         shell: bash
         run: |
-          set -e
+          set -ex
 
-          mkdir -p downloaded
+          mkdir -pv downloaded
 
           URL="${{ inputs.download_url }}"
 
@@ -86,9 +92,11 @@ jobs:
           echo "Descargando: ${URL}"
           echo "Archivo: ${FILE_NAME}"
 
+          # --console-log-level=debug activa los logs máximos del motor de aria2
           aria2c \
             -x 4 \
             -s 4 \
+            --console-log-level=debug \
             --dir=downloaded \
             --out="${FILE_NAME}" \
             "${URL}"
@@ -98,13 +106,12 @@ jobs:
       - name: Build TeraBox destination path
         shell: bash
         run: |
-          set -e
+          set -ex
 
           URL="${{ inputs.download_url }}"
 
           # Extraer solamente el path de la URL:
-          # https://example.com/foo/bar/file.zip
-          # -> /foo/bar/file.zip
+          # https://example.com/foo/bar/file.zip -> /foo/bar/file.zip
           URL_PATH="$(python3 -c 'from urllib.parse import urlparse; import os,sys; print(urlparse(sys.argv[1]).path)' "$URL")"
 
           if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
@@ -112,8 +119,7 @@ jobs:
             exit 1
           fi
 
-          # TeraBox:
-          # /Archive + path de la URL
+          # TeraBox: /Archive + path de la URL
           REMOTE_PATH="/Archive${URL_PATH}"
 
           echo "URL: ${URL}"
@@ -125,7 +131,7 @@ jobs:
       - name: Upload file to TeraBox
         shell: bash
         run: |
-          set -e
+          set -ex
 
           echo "Archivo local: ${DOWNLOADED_FILE}"
           echo "Destino remoto: ${REMOTE_PATH}"
@@ -135,6 +141,7 @@ jobs:
       - name: Show result
         shell: bash
         run: |
+          set -ex
           echo "========================================"
           echo "Upload completed successfully"
           echo "File: ${DOWNLOADED_FILE}"
