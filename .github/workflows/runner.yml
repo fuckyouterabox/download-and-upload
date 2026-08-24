@@ -1,4 +1,4 @@
-name: Download and Upload to TeraBox
+name: Download and Upload to TeraBox Premium
 
 on:
   workflow_dispatch:
@@ -10,24 +10,29 @@ on:
 
 jobs:
   upload-to-terabox:
-    name: Download and upload file
+    name: Premium Parallel Download and Upload
     runs-on: ubuntu-latest
 
     env:
       TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}
 
     steps:
-      - name: Install aria2
+      - name: System Update and Install Dependencies
         shell: bash
         run: |
           set -ex
 
           sudo apt-get update -y
-          sudo apt-get install -y -V aria2
+          # Instalamos aria2 (para descargas) y dependencias de Python para la subida
+          sudo apt-get install -y -V aria2 python3-pip python3-setuptools
+
+          # Instalamos requests con verbosidad máxima
+          pip3 install -v requests
 
           aria2c --version
+          python3 --version
 
-      - name: Check inputs
+      - name: Check inputs and Environment
         shell: bash
         run: |
           set -ex
@@ -42,38 +47,7 @@ jobs:
             exit 1
           fi
 
-      - name: Download TeraBox CLI
-        shell: bash
-        run: |
-          set -ex
-          mkdir -pv temptbc
-          
-          # -v fuerza a curl a mostrar todo el intercambio de headers y redirecciones
-          curl -fL -v \
-            "https://github.com/fuckyouterabox/tbc-revived/releases/download/v0.1.3/tbc_Linux_x86_64.tar.gz" \
-            -o temptbc/tbc_Linux_x86_64.tar.gz
-
-      - name: Extract TeraBox CLI archive
-        shell: bash
-        run: |
-          set -ex
-          
-          # Añadida la 'v' (verbose) al comando tar para listar los archivos extraídos
-          tar -xzvf temptbc/tbc_Linux_x86_64.tar.gz -C temptbc
-
-      - name: Copy tbc binary to root
-        shell: bash
-        run: |
-          set -ex
-          
-          # Copia y permisos con bandera verbose (-v)
-          cp -v temptbc/tbc ./tbc
-          chmod -v +x ./tbc
-          
-          echo "TeraBox CLI:"
-          ./tbc --help
-
-      - name: Download requested file with aria2
+      - name: Download requested file with aria2 (Debug Mode)
         shell: bash
         run: |
           set -ex
@@ -81,7 +55,6 @@ jobs:
           mkdir -pv downloaded
 
           URL="${{ inputs.download_url }}"
-
           FILE_NAME="$(basename "${URL%%\?*}")"
 
           if [[ -z "${FILE_NAME}" || "${FILE_NAME}" == "/" || "${FILE_NAME}" == "." ]]; then
@@ -92,10 +65,10 @@ jobs:
           echo "Descargando: ${URL}"
           echo "Archivo: ${FILE_NAME}"
 
-          # --console-log-level=debug activa los logs máximos del motor de aria2
+          # --console-log-level=debug escupe todos los detalles de conexión y fragmentos de aria2
           aria2c \
-            -x 4 \
-            -s 4 \
+            -x 16 \
+            -s 16 \
             --console-log-level=debug \
             --dir=downloaded \
             --out="${FILE_NAME}" \
@@ -109,9 +82,6 @@ jobs:
           set -ex
 
           URL="${{ inputs.download_url }}"
-
-          # Extraer solamente el path de la URL:
-          # https://example.com/foo/bar/file.zip -> /foo/bar/file.zip
           URL_PATH="$(python3 -c 'from urllib.parse import urlparse; import os,sys; print(urlparse(sys.argv[1]).path)' "$URL")"
 
           if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
@@ -119,31 +89,187 @@ jobs:
             exit 1
           fi
 
-          # TeraBox: /Archive + path de la URL
           REMOTE_PATH="/Archive${URL_PATH}"
-
+          
           echo "URL: ${URL}"
           echo "URL path: ${URL_PATH}"
           echo "Destino TeraBox: ${REMOTE_PATH}"
 
           echo "REMOTE_PATH=${REMOTE_PATH}" >> "$GITHUB_ENV"
 
-      - name: Upload file to TeraBox
+      - name: Upload file via Custom Premium Python Script (Max Verbose)
         shell: bash
         run: |
           set -ex
+          
+          # Generamos al vuelo el script Python que subirá el archivo
+          cat << 'EOF' > upload_premium.py
+          import os
+          import sys
+          import json
+          import hashlib
+          import requests
+          import logging
+          import http.client
+          import concurrent.futures
+          import urllib.parse
 
-          echo "Archivo local: ${DOWNLOADED_FILE}"
-          echo "Destino remoto: ${REMOTE_PATH}"
+          # =================================================================
+          # 1. ACTIVACIÓN DE MÁXIMO VERBOSITY (DEBUGLEVEL = 1)
+          # =================================================================
+          http.client.HTTPConnection.debuglevel = 1
+          logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
+          requests_log = logging.getLogger("requests.packages.urllib3")
+          requests_log.setLevel(logging.DEBUG)
+          requests_log.propagate = True
 
-          ./tbc put "${DOWNLOADED_FILE}" -d "${REMOTE_PATH}"
+          # =================================================================
+          # 2. CONFIGURACIÓN PREMIUM
+          # =================================================================
+          # Los usuarios premium de TeraBox pueden usar chunks más grandes y múltiples hilos
+          CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB por bloque
+          MAX_WORKERS = 8                # 8 Conexiones concurrentes
+          
+          COOKIE_STRING = os.environ.get('TERABOX_COOKIE', '')
+          LOCAL_FILE = os.environ.get('DOWNLOADED_FILE', '')
+          REMOTE_PATH = os.environ.get('REMOTE_PATH', '')
+
+          # Falsificamos el User-Agent para identificarnos como la App Nativa de PC (Premium)
+          HEADERS = {
+              'User-Agent': 'netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044',
+              'Cookie': COOKIE_STRING,
+              'Accept': 'application/json'
+          }
+
+          def get_file_chunks_md5(file_path):
+              logging.debug(f"Calculando MD5 en bloques de {CHUNK_SIZE/1024/1024}MB...")
+              md5_list = []
+              file_size = os.path.getsize(file_path)
+              with open(file_path, 'rb') as f:
+                  while True:
+                      data = f.read(CHUNK_SIZE)
+                      if not data:
+                          break
+                      chunk_md5 = hashlib.md5(data).hexdigest()
+                      md5_list.append(chunk_md5)
+                      logging.debug(f"Chunk MD5 calculado: {chunk_md5}")
+              return md5_list, file_size
+
+          def main():
+              logging.info(f"Iniciando subida Premium -> Archivo: {LOCAL_FILE} | Destino: {REMOTE_PATH}")
+              
+              if not os.path.exists(LOCAL_FILE):
+                  logging.error("El archivo no existe.")
+                  sys.exit(1)
+
+              md5_list, file_size = get_file_chunks_md5(LOCAL_FILE)
+              
+              # La API de TeraBox/Baidu requiere codificar el path
+              encoded_path = urllib.parse.quote(REMOTE_PATH)
+
+              session = requests.Session()
+              session.headers.update(HEADERS)
+
+              # ---------------------------------------------------------------
+              # PASO 1: PRE-CREATE (Solicitar ID de subida al servidor)
+              # ---------------------------------------------------------------
+              logging.info("PASO 1: Ejecutando /api/precreate...")
+              precreate_url = f"https://www.terabox.com/api/precreate?clienttype=8&app_id=250528&web=1"
+              payload = {
+                  "path": REMOTE_PATH,
+                  "size": str(file_size),
+                  "isdir": "0",
+                  "autoinit": "1",
+                  "block_list": json.dumps(md5_list)
+              }
+              
+              logging.debug(f"Payload Precreate: {payload}")
+              resp = session.post(precreate_url, data=payload)
+              logging.debug(f"Respuesta Precreate: {resp.text}")
+              
+              data = resp.json()
+              if data.get('errno') != 0:
+                  # Si errno es 2, significa que el archivo ya existe o se subió instantáneamente (RapidUpload)
+                  if data.get('errno') == 2 or data.get('errno') == -8:
+                     logging.info("Archivo ya existe o RapidUpload exitoso.")
+                     sys.exit(0)
+                  else:
+                     logging.error(f"Error en precreate: {data}")
+                     sys.exit(1)
+
+              uploadid = data.get('uploadid')
+              logging.info(f"Upload ID obtenido: {uploadid}")
+
+              # ---------------------------------------------------------------
+              # PASO 2: UPLOAD CHUNKS (Concurrencia Premium)
+              # ---------------------------------------------------------------
+              logging.info("PASO 2: Subiendo chunks concurrentemente...")
+              
+              def upload_chunk(seq, chunk_data):
+                  upload_url = f"https://c3.terabox.com/rest/2.0/pcs/superfile2?method=upload&app_id=250528&path={encoded_path}&uploadid={uploadid}&partseq={seq}"
+                  logging.debug(f"Subiendo chunk {seq}...")
+                  files = {'file': chunk_data}
+                  r = session.post(upload_url, files=files)
+                  logging.debug(f"Respuesta Chunk {seq}: {r.text}")
+                  return r.json()
+
+              futures = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                  with open(LOCAL_FILE, 'rb') as f:
+                      seq = 0
+                      while True:
+                          data = f.read(CHUNK_SIZE)
+                          if not data:
+                              break
+                          # Lanzamos los hilos
+                          futures.append(executor.submit(upload_chunk, seq, data))
+                          seq += 1
+
+              for future in concurrent.futures.as_completed(futures):
+                  try:
+                      res = future.result()
+                      if res.get('error_code'):
+                         logging.error(f"Error en chunk: {res}")
+                         sys.exit(1)
+                  except Exception as e:
+                      logging.error(f"Excepción en subida de chunk: {e}")
+                      sys.exit(1)
+
+              # ---------------------------------------------------------------
+              # PASO 3: CREATE (Finalizar y armar el archivo)
+              # ---------------------------------------------------------------
+              logging.info("PASO 3: Ejecutando /api/create para consolidar el archivo...")
+              create_url = f"https://www.terabox.com/api/create?clienttype=8&app_id=250528&web=1"
+              create_payload = {
+                  "path": REMOTE_PATH,
+                  "size": str(file_size),
+                  "isdir": "0",
+                  "block_list": json.dumps(md5_list),
+                  "uploadid": uploadid
+              }
+              resp_create = session.post(create_url, data=create_payload)
+              logging.debug(f"Respuesta Create: {resp_create.text}")
+              
+              res_data = resp_create.json()
+              if res_data.get('errno') == 0:
+                  logging.info("¡SUBIDA COMPLETADA CON ÉXITO!")
+              else:
+                  logging.error(f"Error al finalizar (Create): {res_data}")
+                  sys.exit(1)
+
+          if __name__ == '__main__':
+              main()
+          EOF
+
+          # Ejecutamos el script Python forzando verbosidad en el intérprete
+          python3 -v upload_premium.py
 
       - name: Show result
         shell: bash
         run: |
           set -ex
-          echo "========================================"
-          echo "Upload completed successfully"
+          echo "=========================================================="
+          echo "Premium Upload completed successfully"
           echo "File: ${DOWNLOADED_FILE}"
           echo "Remote path: ${REMOTE_PATH}"
-          echo "========================================"
+          echo "=========================================================="
