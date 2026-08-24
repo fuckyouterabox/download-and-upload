@@ -1,3 +1,4 @@
+```yaml
 name: Download and Upload to TeraBox Premium
 
 on:
@@ -26,7 +27,7 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
           sudo apt-get update -y
           sudo apt-get install -y aria2 curl jq python3
@@ -63,7 +64,7 @@ jobs:
           fi
 
       # ==========================================================
-      # DESCUBRIR ARCHIVOS
+      # DESCUBRIR ARCHIVOS DE H5AI
       # ==========================================================
 
       - name: Discover files from h5ai
@@ -73,6 +74,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          rm -rf downloaded
           mkdir -p downloaded
 
           python3 <<'PY'
@@ -92,17 +94,16 @@ jobs:
               "Chrome/151.0 Safari/537.36"
           )
 
-          context = ssl.create_default_context()
+          SSL_CONTEXT = ssl.create_default_context()
 
 
           class H5AIParser(HTMLParser):
+
               def __init__(self):
                   super().__init__()
 
                   self.current_li_classes = set()
-                  self.current_anchor_href = None
-                  self.current_anchor_text = []
-
+                  self.current_href = None
                   self.in_fb_name = False
 
                   self.files = []
@@ -111,17 +112,8 @@ jobs:
               def handle_starttag(self, tag, attrs):
                   attrs = dict(attrs)
 
-                  # ------------------------------------------------
-                  # h5ai moderno:
-                  #
-                  # <li class="item file">
-                  # <a href="...">
-                  #
-                  # <li class="item folder">
-                  # <a href="...">
-                  # ------------------------------------------------
-
                   if tag == "li":
+
                       classes = set(
                           attrs.get("class", "").split()
                       )
@@ -132,27 +124,20 @@ jobs:
                           self.current_li_classes = set()
 
                   elif tag == "a":
+
                       href = attrs.get("href")
 
                       if not href:
                           return
 
                       if self.current_li_classes:
-                          self.current_anchor_href = href
-                          self.current_anchor_text = []
-
-                      # ------------------------------------------------
-                      # h5ai fallback:
-                      #
-                      # <td class="fb-n">
-                      #   <a href="...">
-                      # ------------------------------------------------
+                          self.current_href = href
 
                       if self.in_fb_name:
-                          self.current_anchor_href = href
-                          self.current_anchor_text = []
+                          self.current_href = href
 
                   elif tag == "td":
+
                       classes = set(
                           attrs.get("class", "").split()
                       )
@@ -160,78 +145,68 @@ jobs:
                       if "fb-n" in classes:
                           self.in_fb_name = True
 
-              def handle_data(self, data):
-                  if self.current_anchor_href is not None:
-                      self.current_anchor_text.append(data)
-
               def handle_endtag(self, tag):
-                  if tag == "td" and self.in_fb_name:
+
+                  if tag == "td":
                       self.in_fb_name = False
 
                   elif tag == "a":
-                      href = self.current_anchor_href
+
+                      href = self.current_href
 
                       if href:
+
                           href = href.strip()
 
-                          # Ignorar:
-                          #   ..
-                          #   .
-                          #   javascript:
-                          #   #anchors
-                          #   recursos h5ai
-                          if href in ("..", ".", ""):
-                              self.current_anchor_href = None
-                              self.current_anchor_text = []
-                              return
+                          if href not in ("", ".", "..", "../"):
 
-                          if href.startswith("#"):
-                              self.current_anchor_href = None
-                              self.current_anchor_text = []
-                              return
+                              if href.startswith("#"):
+                                  pass
 
-                          if href.lower().startswith("javascript:"):
-                              self.current_anchor_href = None
-                              self.current_anchor_text = []
-                              return
+                              elif href.lower().startswith("javascript:"):
+                                  pass
 
-                          classes = self.current_li_classes
+                              elif "/_h5ai/" in href:
+                                  pass
 
-                          if "file" in classes:
-                              self.files.append(href)
-
-                          elif "folder" in classes:
-                              self.folders.append(href)
-
-                          else:
-                              # Fallback de h5ai:
-                              #
-                              # href terminado en / = carpeta
-                              # cualquier otro = archivo
-                              if href.endswith("/"):
-                                  self.folders.append(href)
-                              else:
+                              elif "file" in self.current_li_classes:
                                   self.files.append(href)
 
-                      self.current_anchor_href = None
-                      self.current_anchor_text = []
+                              elif "folder" in self.current_li_classes:
+                                  self.folders.append(href)
+
+                              else:
+                                  # h5ai fallback:
+                                  #
+                                  # terminado en /
+                                  # = carpeta
+                                  #
+                                  # cualquier otra cosa
+                                  # = archivo
+
+                                  if href.endswith("/"):
+                                      self.folders.append(href)
+                                  else:
+                                      self.files.append(href)
+
+                      self.current_href = None
 
                   elif tag == "li":
                       self.current_li_classes = set()
 
 
-          visited_directories = set()
+          visited = set()
           discovered_files = {}
 
 
           def fetch(url):
+
               print()
               print("=" * 80)
-              print("GET")
-              print(url)
+              print("GET:", url)
               print("=" * 80)
 
-              req = Request(
+              request = Request(
                   url,
                   headers={
                       "User-Agent": USER_AGENT,
@@ -239,7 +214,12 @@ jobs:
                   }
               )
 
-              with urlopen(req, context=context, timeout=60) as response:
+              with urlopen(
+                  request,
+                  context=SSL_CONTEXT,
+                  timeout=60
+              ) as response:
+
                   content_type = response.headers.get(
                       "Content-Type",
                       ""
@@ -250,131 +230,140 @@ jobs:
               return content_type, body
 
 
-          def clean_url(url):
-              parsed = urlparse(url)
+          def is_html(content_type, body):
 
-              # No descargar recursos que pertenezcan a h5ai.
-              if "/_h5ai/" in parsed.path:
-                  return None
+              if "html" in content_type.lower():
+                  return True
 
-              if parsed.scheme not in ("http", "https"):
-                  return None
+              start = body[:1000].lstrip().lower()
 
-              return url
+              return (
+                  start.startswith(b"<!doctype html")
+                  or start.startswith(b"<html")
+                  or b"<body" in start
+              )
 
 
-          def filename_from_url(url):
+          def file_name(url):
+
               path = urlparse(url).path.rstrip("/")
 
               if not path:
                   return None
 
-              return unquote(path.split("/")[-1])
-
-
-          def crawl(directory_url, relative_prefix=""):
-              directory_url = directory_url.rstrip("/") + "/"
-
-              if directory_url in visited_directories:
-                  return
-
-              visited_directories.add(directory_url)
-
-              try:
-                  content_type, body = fetch(directory_url)
-              except Exception as e:
-                  print(
-                      f"ERROR accediendo a {directory_url}: {e}"
-                  )
-                  return
-
-              # ------------------------------------------------------
-              # Si la URL no devuelve HTML, es un archivo.
-              # ------------------------------------------------------
-
-              body_start = body[:500].lstrip().lower()
-
-              looks_like_html = (
-                  "html" in content_type.lower()
-                  or body_start.startswith(b"<!doctype html")
-                  or body_start.startswith(b"<html")
-                  or b"<body" in body_start
+              return unquote(
+                  path.split("/")[-1]
               )
 
-              if not looks_like_html:
-                  filename = filename_from_url(directory_url)
 
-                  if filename:
-                      relative_path = (
-                          f"{relative_prefix}{filename}"
-                      )
+          def crawl(directory_url, relative_path=""):
 
-                      discovered_files[relative_path] = directory_url
+              directory_url = (
+                  directory_url.rstrip("/") + "/"
+              )
 
+              if directory_url in visited:
                   return
+
+              visited.add(directory_url)
 
               try:
-                  html = body.decode(
-                      "utf-8",
-                      errors="ignore"
+                  content_type, body = fetch(
+                      directory_url
                   )
-              except Exception:
+
+              except Exception as error:
+                  print(
+                      f"ERROR accediendo a "
+                      f"{directory_url}: {error}"
+                  )
                   return
+
+              # --------------------------------------------------
+              # Si no devuelve HTML, tratarlo como archivo.
+              # --------------------------------------------------
+
+              if not is_html(content_type, body):
+
+                  name = file_name(directory_url)
+
+                  if name:
+                      relative_file = (
+                          relative_path + name
+                      )
+
+                      discovered_files[
+                          relative_file
+                      ] = directory_url
+
+                  return
+
+              html = body.decode(
+                  "utf-8",
+                  errors="ignore"
+              )
 
               parser = H5AIParser()
               parser.feed(html)
 
-              # ------------------------------------------------------
-              # Archivos
-              # ------------------------------------------------------
+              # --------------------------------------------------
+              # ARCHIVOS
+              # --------------------------------------------------
 
               for href in parser.files:
+
                   full_url = urljoin(
                       directory_url,
                       href
                   )
 
-                  full_url = clean_url(full_url)
-
-                  if not full_url:
+                  if "/_h5ai/" in urlparse(
+                      full_url
+                  ).path:
                       continue
 
-                  filename = filename_from_url(full_url)
+                  name = file_name(full_url)
 
-                  if not filename:
+                  if not name:
                       continue
 
-                  relative_path = (
-                      f"{relative_prefix}{filename}"
+                  relative_file = (
+                      relative_path + name
                   )
 
                   discovered_files[
-                      relative_path
+                      relative_file
                   ] = full_url
 
-              # ------------------------------------------------------
-              # Carpetas
-              # ------------------------------------------------------
+              # --------------------------------------------------
+              # CARPETAS
+              # --------------------------------------------------
 
               for href in parser.folders:
+
+                  if href in (
+                      ".",
+                      "..",
+                      "../"
+                  ):
+                      continue
+
                   full_url = urljoin(
                       directory_url,
                       href
                   )
 
-                  full_url = clean_url(full_url)
-
-                  if not full_url:
+                  if "/_h5ai/" in urlparse(
+                      full_url
+                  ).path:
                       continue
 
-                  # No volver a subir hacia el padre.
-                  if href in ("..", "../"):
-                      continue
+                  parsed_path = urlparse(
+                      full_url
+                  ).path.rstrip("/")
 
                   folder_name = unquote(
-                      urlparse(full_url).path
-                      .rstrip("/")
-                      .split("/")[-1]
+                      parsed_path.split("/")[-1]
                   )
 
                   if not folder_name:
@@ -382,31 +371,34 @@ jobs:
 
                   crawl(
                       full_url,
-                      f"{relative_prefix}{folder_name}/"
+                      relative_path
+                      + folder_name
+                      + "/"
                   )
 
 
           parsed = urlparse(INPUT_URL)
 
-          # ----------------------------------------------------------
+          # ------------------------------------------------------
           # ARCHIVO DIRECTO
-          # ----------------------------------------------------------
+          # ------------------------------------------------------
 
           if not parsed.path.endswith("/"):
-              filename = filename_from_url(INPUT_URL)
+              name = file_name(INPUT_URL)
 
-              if not filename:
+              if not name:
                   raise SystemExit(
-                      "No se pudo determinar el nombre del archivo."
+                      "No se pudo determinar "
+                      "el nombre del archivo."
                   )
 
               discovered_files[
-                  filename
+                  name
               ] = INPUT_URL
 
-          # ----------------------------------------------------------
-          # CARPETA / ÍNDICE H5AI
-          # ----------------------------------------------------------
+          # ------------------------------------------------------
+          # CARPETA H5AI
+          # ------------------------------------------------------
 
           else:
               crawl(INPUT_URL)
@@ -414,7 +406,7 @@ jobs:
 
           if not discovered_files:
               raise SystemExit(
-                  "No se encontraron archivos en la URL indicada."
+                  "No se encontraron archivos."
               )
 
 
@@ -427,7 +419,7 @@ jobs:
               "files.tsv",
               "w",
               encoding="utf-8"
-          ) as out:
+          ) as output:
 
               for relative_path, url in sorted(
                   discovered_files.items()
@@ -437,25 +429,26 @@ jobs:
                       f"{relative_path}\t{url}"
                   )
 
-                  out.write(
+                  output.write(
                       f"{relative_path}\t{url}\n"
                   )
 
           print()
           print(
-              f"Total: {len(discovered_files)} archivos"
+              "Total de archivos:",
+              len(discovered_files)
           )
           PY
 
           echo
           echo "=========================================================="
-          echo "Contenido de files.tsv"
+          echo "files.tsv"
           echo "=========================================================="
 
           cat files.tsv
 
       # ==========================================================
-      # PREPARAR LISTA DE ARIA2
+      # CREAR LISTA DE ARIA2
       # ==========================================================
 
       - name: Build aria2 download list
@@ -469,18 +462,23 @@ jobs:
 
             [[ -z "${RELATIVE_PATH}" ]] && continue
 
-            DIRNAME="$(dirname "${RELATIVE_PATH}")"
-            BASENAME="$(basename "${RELATIVE_PATH}")"
+            DIRECTORY="$(
+              dirname "${RELATIVE_PATH}"
+            )"
+
+            FILENAME="$(
+              basename "${RELATIVE_PATH}"
+            )"
 
             echo "${URL}" >> aria2.txt
 
-            if [[ "${DIRNAME}" != "." ]]; then
-              echo "  dir=downloaded/${DIRNAME}" >> aria2.txt
-            else
+            if [[ "${DIRECTORY}" == "." ]]; then
               echo "  dir=downloaded" >> aria2.txt
+            else
+              echo "  dir=downloaded/${DIRECTORY}" >> aria2.txt
             fi
 
-            echo "  out=${BASENAME}" >> aria2.txt
+            echo "  out=${FILENAME}" >> aria2.txt
             echo >> aria2.txt
 
           done < files.tsv
@@ -492,7 +490,7 @@ jobs:
           cat aria2.txt
 
       # ==========================================================
-      # DESCARGAR TODO
+      # DESCARGAR TODOS LOS ARCHIVOS
       # ==========================================================
 
       - name: Download files with aria2
@@ -520,10 +518,10 @@ jobs:
 
           find downloaded \
             -type f \
-            -print
+            -printf '  %P\n'
 
       # ==========================================================
-      # CALCULAR DIRECTORIO REMOTO BASE
+      # DIRECTORIO REMOTO BASE
       # ==========================================================
 
       - name: Build TeraBox destination
@@ -544,36 +542,35 @@ jobs:
           URL_PATH="${URL_PATH%%\?*}"
           URL_PATH="${URL_PATH%%\#*}"
 
-          # ------------------------------------------------------
-          # Si es una carpeta, conservar la carpeta.
-          # ------------------------------------------------------
-
           if [[ "${URL_PATH}" == */ ]]; then
+
             URL_PATH="${URL_PATH%/}"
 
           else
-            # Si es un archivo, subir al directorio padre.
-            URL_PATH="$(dirname "${URL_PATH}")"
+
+            URL_PATH="$(
+              dirname "${URL_PATH}"
+            )"
 
           fi
 
           if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
             REMOTE_DIR="/Archive"
-
           else
             REMOTE_DIR="/Archive${URL_PATH}"
-
           fi
 
-          echo "REMOTE_DIR=${REMOTE_DIR}" >> "$GITHUB_ENV"
+          echo "REMOTE_DIR=${REMOTE_DIR}" \
+            >> "$GITHUB_ENV"
 
+          echo
           echo "=========================================================="
-          echo "TeraBox destination"
+          echo "DIRECTORIO TERABOX"
           echo "=========================================================="
           echo "${REMOTE_DIR}"
 
       # ==========================================================
-      # CREAR CARPETAS REMOTAS
+      # CREAR CARPETAS TERABOX
       # ==========================================================
 
       - name: Create TeraBox directories
@@ -581,24 +578,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p remote_dirs
-
-          # ------------------------------------------------------
-          # Obtener todas las carpetas necesarias a partir de
-          # files.tsv.
-          # ------------------------------------------------------
+          # IMPORTANTE:
+          # remote_dirs.txt es un ARCHIVO.
+          # Antes estaba mal definido como directorio.
+          rm -f remote_dirs.txt
+          touch remote_dirs.txt
 
           while IFS=$'\t' read -r RELATIVE_PATH URL; do
 
             [[ -z "${RELATIVE_PATH}" ]] && continue
 
-            DIR="$(dirname "${RELATIVE_PATH}")"
+            DIRECTORY="$(
+              dirname "${RELATIVE_PATH}"
+            )"
 
-            [[ "${DIR}" == "." ]] && continue
+            [[ "${DIRECTORY}" == "." ]] && continue
 
             CURRENT=""
 
-            IFS='/' read -ra PARTS <<< "${DIR}"
+            IFS='/' read -ra PARTS <<< "${DIRECTORY}"
 
             for PART in "${PARTS[@]}"; do
 
@@ -611,78 +609,86 @@ jobs:
               fi
 
               echo "${REMOTE_DIR}/${CURRENT}" \
-                >> remote_dirs
+                >> remote_dirs.txt
 
             done
 
           done < files.tsv
 
-          sort -u remote_dirs -o remote_dirs
+          sort -u \
+            remote_dirs.txt \
+            -o remote_dirs.txt
 
+          echo
           echo "=========================================================="
-          echo "Directorios remotos necesarios"
+          echo "DIRECTORIOS TERABOX NECESARIOS"
           echo "=========================================================="
 
-          if [[ -s remote_dirs ]]; then
-            cat remote_dirs
+          if [[ -s remote_dirs.txt ]]; then
+            cat remote_dirs.txt
           else
             echo "No hay subdirectorios."
           fi
 
           # ------------------------------------------------------
-          # Crear uno por uno.
+          # Crear carpetas.
+          #
+          # Si ya existen, no interrumpimos el workflow.
           # ------------------------------------------------------
 
-          if [[ -s remote_dirs ]]; then
+          while IFS= read -r DIRECTORY; do
 
-            while IFS= read -r DIRECTORY; do
+            [[ -z "${DIRECTORY}" ]] && continue
 
-              echo
-              echo "Creando: ${DIRECTORY}"
+            echo
+            echo "Creando/verificando:"
+            echo "${DIRECTORY}"
 
-              RESPONSE="$(
-                curl \
-                  --silent \
-                  --show-error \
-                  --fail-with-body \
-                  --request POST \
-                  --cookie "${TERABOX_COOKIE}" \
-                  --header "User-Agent: netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044" \
-                  --header "Origin: https://www.terabox.com" \
-                  --header "Referer: https://www.terabox.com/main" \
-                  --header "Content-Type: application/x-www-form-urlencoded" \
-                  --data-urlencode "path=${DIRECTORY}" \
-                  --data-urlencode "isdir=1" \
-                  --data-urlencode 'block_list=[]' \
-                  --data-urlencode "jsToken=${TERABOX_JSTOKEN}" \
-                  --data-urlencode "app_id=250528" \
-                  --data-urlencode "web=1" \
-                  --data-urlencode "channel=dubox" \
-                  --data-urlencode "clienttype=0" \
-                  "https://www.terabox.com/api/create"
-              )"
+            RESPONSE="$(
+              curl \
+                --silent \
+                --show-error \
+                --fail-with-body \
+                --request POST \
+                --cookie "${TERABOX_COOKIE}" \
+                --header "User-Agent: netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044" \
+                --header "Origin: https://www.terabox.com" \
+                --header "Referer: https://www.terabox.com/main" \
+                --header "Content-Type: application/x-www-form-urlencoded" \
+                --data-urlencode "path=${DIRECTORY}" \
+                --data-urlencode "isdir=1" \
+                --data-urlencode "block_list=[]" \
+                --data-urlencode "jsToken=${TERABOX_JSTOKEN}" \
+                --data-urlencode "app_id=250528" \
+                --data-urlencode "web=1" \
+                --data-urlencode "channel=dubox" \
+                --data-urlencode "clienttype=0" \
+                "https://www.terabox.com/api/create"
+            )"
 
-              echo "${RESPONSE}"
+            echo "${RESPONSE}"
 
-              ERRNO="$(
-                echo "${RESPONSE}" |
-                jq -r '.errno // -999'
-              )"
+            ERRNO="$(
+              echo "${RESPONSE}" |
+              jq -r '.errno // -999'
+            )"
 
-              # 0 = creada correctamente.
-              #
-              # Algunos clientes devuelven un error/conflicto
-              # si la carpeta ya existe. En ese caso continuamos.
-              if [[ "${ERRNO}" != "0" ]]; then
-                echo "Aviso: la carpeta puede ya existir."
-              fi
+            if [[ "${ERRNO}" == "0" ]]; then
 
-            done < remote_dirs
+              echo "Carpeta creada/verificada correctamente."
 
-          fi
+            else
+
+              echo "Aviso:"
+              echo "La carpeta probablemente ya existe."
+              echo "errno=${ERRNO}"
+
+            fi
+
+          done < remote_dirs.txt
 
       # ==========================================================
-      # SUBIR UN ARCHIVO
+      # SUBIR ARCHIVO
       # ==========================================================
 
       - name: Upload files to TeraBox
@@ -709,25 +715,25 @@ jobs:
 
             echo
             echo "=========================================================="
-            echo "SUBIENDO ARCHIVO"
+            echo "SUBIENDO"
             echo "=========================================================="
-            echo "Local:"
-            echo "${FILE}"
-            echo
-            echo "Remoto:"
-            echo "${REMOTE_PATH}"
-            echo
-            echo "Directorio:"
-            echo "${TARGET_PATH}"
+            echo "Local : ${FILE}"
+            echo "Remote: ${REMOTE_PATH}"
             echo "=========================================================="
 
             local FILE_SIZE
-            FILE_SIZE="$(stat -c '%s' "${FILE}")"
+            FILE_SIZE="$(
+              stat -c '%s' "${FILE}"
+            )"
 
             local CHUNK_DIR
-            CHUNK_DIR="$(mktemp -d)"
+            CHUNK_DIR="$(
+              mktemp -d
+            )"
 
-            local CHUNK_SIZE=$((20 * 1024 * 1024))
+            local CHUNK_SIZE=$(
+              20 * 1024 * 1024
+            )
 
             split \
               -b "${CHUNK_SIZE}" \
@@ -743,7 +749,10 @@ jobs:
             for PART in "${CHUNK_DIR}"/part_*; do
 
               local MD5
-              MD5="$(md5sum "${PART}" | awk '{print $1}')"
+              MD5="$(
+                md5sum "${PART}" |
+                awk '{print $1}'
+              )"
 
               if [[ "${FIRST}" -eq 1 ]]; then
                 FIRST=0
@@ -753,18 +762,20 @@ jobs:
 
               BLOCK_LIST+="\"${MD5}\""
 
-              PARTSEQ=$((PARTSEQ + 1))
+              PARTSEQ=$(
+                (PARTSEQ + 1)
+              )
 
             done
 
             BLOCK_LIST+="]"
 
-            echo "Tamaño : ${FILE_SIZE}"
-            echo "Chunks : ${PARTSEQ}"
+            echo "Tamaño: ${FILE_SIZE}"
+            echo "Chunks: ${PARTSEQ}"
 
-            # ------------------------------------------------------
+            # ----------------------------------------------------
             # PRECREATE
-            # ------------------------------------------------------
+            # ----------------------------------------------------
 
             local RESPONSE
 
@@ -803,9 +814,12 @@ jobs:
             )"
 
             if [[ "${ERRNO}" != "0" ]]; then
-              echo "::error::Precreate falló para ${FILE_NAME}"
+
+              echo "::error::Precreate falló."
               rm -rf "${CHUNK_DIR}"
+
               return 1
+
             fi
 
             local UPLOAD_ID
@@ -823,21 +837,27 @@ jobs:
               )"
 
               if [[ "${RETURN_TYPE}" == "2" ]]; then
+
                 echo "El archivo ya existe:"
                 echo "${REMOTE_PATH}"
 
                 rm -rf "${CHUNK_DIR}"
+
                 return 0
+
               fi
 
               echo "::error::No se recibió uploadid."
+
               rm -rf "${CHUNK_DIR}"
+
               return 1
+
             fi
 
-            # ------------------------------------------------------
-            # CHUNK UPLOAD
-            # ------------------------------------------------------
+            # ----------------------------------------------------
+            # UPLOAD CHUNKS
+            # ----------------------------------------------------
 
             upload_chunk() {
 
@@ -869,10 +889,15 @@ jobs:
               )"
 
               if [[ "${ERROR_CODE}" != "0" ]]; then
-                echo "::error::Falló el chunk ${SEQ}"
+
+                echo "::error::Falló el chunk ${SEQ}."
+
                 echo "${UPLOAD_RESPONSE}"
+
                 return 1
+
               fi
+
             }
 
             local ACTIVE=0
@@ -881,12 +906,19 @@ jobs:
 
             for PART in "${CHUNK_DIR}"/part_*; do
 
-              upload_chunk "${PART}" "${SEQ}" &
+              upload_chunk \
+                "${PART}" \
+                "${SEQ}" &
 
               PIDS+=("$!")
 
-              ACTIVE=$((ACTIVE + 1))
-              SEQ=$((SEQ + 1))
+              ACTIVE=$(
+                (ACTIVE + 1)
+              )
+
+              SEQ=$(
+                (SEQ + 1)
+              )
 
               if [[ "${ACTIVE}" -ge "${MAX_PARALLEL}" ]]; then
 
@@ -905,9 +937,9 @@ jobs:
               wait "${PID}"
             done
 
-            # ------------------------------------------------------
-            # CREATE
-            # ------------------------------------------------------
+            # ----------------------------------------------------
+            # CREATE FINAL
+            # ----------------------------------------------------
 
             echo "Finalizando ${FILE_NAME}..."
 
@@ -945,21 +977,29 @@ jobs:
             )"
 
             if [[ "${ERRNO}" != "0" ]]; then
-              echo "::error::Create falló para ${FILE_NAME}"
+
+              echo "::error::Create falló."
+
               rm -rf "${CHUNK_DIR}"
+
               return 1
+
             fi
 
             echo
-            echo "OK: ${REMOTE_PATH}"
+            echo "=========================================================="
+            echo "UPLOAD COMPLETADO"
+            echo "=========================================================="
+            echo "Archivo: ${REMOTE_PATH}"
+            echo "=========================================================="
 
             rm -rf "${CHUNK_DIR}"
           }
 
 
-          # --------------------------------------------------------
-          # Procesar files.tsv
-          # --------------------------------------------------------
+          # ------------------------------------------------------
+          # SUBIR TODOS LOS ARCHIVOS
+          # ------------------------------------------------------
 
           while IFS=$'\t' read -r RELATIVE_PATH URL; do
 
@@ -968,8 +1008,12 @@ jobs:
             FILE="downloaded/${RELATIVE_PATH}"
 
             if [[ ! -f "${FILE}" ]]; then
-              echo "::error::No existe el archivo descargado: ${FILE}"
+
+              echo "::error::No existe:"
+              echo "${FILE}"
+
               exit 1
+
             fi
 
             upload_file \
@@ -984,16 +1028,18 @@ jobs:
 
       - name: Show result
         shell: bash
+        env:
+          INPUT_URL: ${{ inputs.download_url }}
         run: |
           set -euo pipefail
 
           echo
           echo "=========================================================="
-          echo "UPLOAD COMPLETADO"
+          echo "UPLOAD COMPLETADO CORRECTAMENTE"
           echo "=========================================================="
           echo
           echo "Origen:"
-          echo "${{ inputs.download_url }}"
+          echo "${INPUT_URL}"
           echo
           echo "Destino:"
           echo "${REMOTE_DIR}"
@@ -1004,3 +1050,4 @@ jobs:
             -printf '  - %P\n'
           echo
           echo "=========================================================="
+```
