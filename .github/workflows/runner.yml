@@ -46,9 +46,7 @@ jobs:
         shell: bash
         run: |
           set -e
-
           mkdir -p temptbc
-
           curl -fL \
             "https://github.com/fuckyouterabox/tbc-revived/releases/download/v0.1.3/tbc_Linux_x86_64.tar.gz" \
             -o temptbc/tbc_Linux_x86_64.tar.gz
@@ -57,28 +55,15 @@ jobs:
         shell: bash
         run: |
           set -e
-
-          tar -xzf temptbc/tbc_Linux_x86_64.tar.gz \
-            -C temptbc
-
-      - name: Extract TeraBox CLI tar
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p temptbcdecompressed
-
-          tar -xf temptbc/tbc_Linux_x86_64.tar \
-            -C temptbcdecompressed
+          tar -xzf temptbc/tbc_Linux_x86_64.tar.gz -C temptbc
 
       - name: Copy tbc binary to root
         shell: bash
         run: |
           set -e
-
-          cp temptbcdecompressed/tbc ./tbc
+          # Copy directly from temptbc, no second extraction needed
+          cp temptbc/tbc ./tbc
           chmod +x ./tbc
-
           echo "TeraBox CLI:"
           ./tbc --help
 
