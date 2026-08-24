@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      TERABOX_JSTOKEN: ${{ secrets.TERABOX_JSTOKEN }}
       TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}
 
     steps:
