@@ -145,9 +145,7 @@ jobs:
           echo "Archivo local: ${DOWNLOADED_FILE}"
           echo "Destino remoto: ${REMOTE_PATH}"
 
-          ./tbc put \
-            "${DOWNLOADED_FILE}" \
-            "${REMOTE_PATH}"
+          ./tbc put "${DOWNLOADED_FILE}" -d "${REMOTE_PATH}"
 
       - name: Show result
         shell: bash
