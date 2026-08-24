@@ -10,11 +10,11 @@ on:
 
 jobs:
   upload-to-terabox:
-    name: Official TeraBox Open Platform Upload
+    name: Premium Parallel Download and Upload
     runs-on: ubuntu-latest
 
     env:
-      TERABOX_ACCESS_TOKEN: ${{ secrets.TERABOX_ACCESS_TOKEN }}
+      TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}
 
     steps:
       - name: Install dependencies
@@ -23,19 +23,19 @@ jobs:
           set -euxo pipefail
 
           sudo apt-get update -y
-          sudo apt-get install -y aria2 jq curl
+          sudo apt-get install -y aria2 curl jq
 
           aria2c --version
           curl --version
           jq --version
 
-      - name: Check inputs
+      - name: Check inputs and environment
         shell: bash
         run: |
           set -euxo pipefail
 
-          if [[ -z "${TERABOX_ACCESS_TOKEN}" ]]; then
-            echo "::error::El secret TERABOX_ACCESS_TOKEN no está configurado."
+          if [[ -z "${TERABOX_COOKIE}" ]]; then
+            echo "::error::El secret TERABOX_COOKIE no está configurado."
             exit 1
           fi
 
@@ -44,7 +44,7 @@ jobs:
             exit 1
           fi
 
-      - name: Download file with aria2
+      - name: Download requested file with aria2
         shell: bash
         run: |
           set -euxo pipefail
@@ -52,15 +52,14 @@ jobs:
           mkdir -p downloaded
 
           URL="${{ inputs.download_url }}"
-
           FILE_NAME="$(basename "${URL%%\?*}")"
 
           if [[ -z "${FILE_NAME}" || "${FILE_NAME}" == "/" || "${FILE_NAME}" == "." ]]; then
-            echo "::error::No se pudo determinar el nombre del archivo."
+            echo "::error::No se pudo determinar el nombre del archivo desde la URL."
             exit 1
           fi
 
-          echo "URL: ${URL}"
+          echo "Descargando: ${URL}"
           echo "Archivo: ${FILE_NAME}"
 
           aria2c \
@@ -73,93 +72,44 @@ jobs:
 
           echo "DOWNLOADED_FILE=downloaded/${FILE_NAME}" >> "$GITHUB_ENV"
 
-      - name: Get TeraBox API domains
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "Obteniendo información del access_token..."
-
-          TOKEN_INFO="$(
-            curl --fail-with-body \
-              --silent \
-              --show-error \
-              --request POST \
-              --form "access_token=${TERABOX_ACCESS_TOKEN}" \
-              "https://www.terabox.com/oauth/tokeninfo"
-          )"
-
-          echo "Token information received."
-
-          ERRNO="$(echo "${TOKEN_INFO}" | jq -r '.errno // -1')"
-
-          if [[ "${ERRNO}" != "0" ]]; then
-            echo "::error::TeraBox rechazó el access_token."
-            echo "${TOKEN_INFO}"
-            exit 1
-          fi
-
-          API_DOMAIN="$(echo "${TOKEN_INFO}" | jq -r '.data.api_domain')"
-          UPLOAD_DOMAIN="$(echo "${TOKEN_INFO}" | jq -r '.data.upload_domain')"
-          CLIENT_ID="$(echo "${TOKEN_INFO}" | jq -r '.data.client_id')"
-
-          if [[ -z "${API_DOMAIN}" || "${API_DOMAIN}" == "null" ]]; then
-            echo "::error::TeraBox no devolvió api_domain."
-            exit 1
-          fi
-
-          if [[ -z "${UPLOAD_DOMAIN}" || "${UPLOAD_DOMAIN}" == "null" ]]; then
-            echo "::error::TeraBox no devolvió upload_domain."
-            exit 1
-          fi
-
-          echo "API domain: ${API_DOMAIN}"
-          echo "Upload domain: ${UPLOAD_DOMAIN}"
-          echo "Client ID: ${CLIENT_ID}"
-
-          echo "TERABOX_API_DOMAIN=${API_DOMAIN}" >> "$GITHUB_ENV"
-          echo "TERABOX_UPLOAD_DOMAIN=${UPLOAD_DOMAIN}" >> "$GITHUB_ENV"
-          echo "TERABOX_CLIENT_ID=${CLIENT_ID}" >> "$GITHUB_ENV"
-
       - name: Build TeraBox destination path
         shell: bash
         run: |
           set -euxo pipefail
 
-          FILE_NAME="$(basename "${DOWNLOADED_FILE}")"
+          URL="${{ inputs.download_url }}"
 
-          # La Open Platform de TeraBox asigna los archivos
-          # a un espacio propio de la aplicación.
-          #
-          # Cambia "TeraBox GitHub Actions" por el nombre
-          # de tu aplicación registrada en TeraBox.
-          APP_NAME="TeraBox GitHub Actions"
+          # Extrae únicamente el path de la URL.
+          URL_PATH="$(printf '%s' "${URL}" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+##')"
+          URL_PATH="${URL_PATH%%\?*}"
+          URL_PATH="${URL_PATH%%\#*}"
 
-          REMOTE_DIR="/From: Other Applications/${APP_NAME}-"
-          REMOTE_PATH="${REMOTE_DIR}/${FILE_NAME}"
+          if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
+            echo "::error::No se pudo obtener la ruta desde la URL."
+            exit 1
+          fi
 
-          echo "Aplicación: ${APP_NAME}"
-          echo "Directorio remoto: ${REMOTE_DIR}"
-          echo "Archivo remoto: ${REMOTE_PATH}"
+          REMOTE_PATH="/Archive${URL_PATH}"
 
-          echo "REMOTE_DIR=${REMOTE_DIR}" >> "$GITHUB_ENV"
+          echo "URL: ${URL}"
+          echo "URL path: ${URL_PATH}"
+          echo "Destino TeraBox: ${REMOTE_PATH}"
+
           echo "REMOTE_PATH=${REMOTE_PATH}" >> "$GITHUB_ENV"
 
-      - name: Calculate file information
+      - name: Prepare upload chunks
         shell: bash
         run: |
           set -euxo pipefail
 
+          mkdir -p chunks
+
           FILE_SIZE="$(stat -c '%s' "${DOWNLOADED_FILE}")"
+          CHUNK_SIZE=$((20 * 1024 * 1024))
 
           echo "Archivo: ${DOWNLOADED_FILE}"
           echo "Tamaño: ${FILE_SIZE} bytes"
-
-          # TeraBox requiere MD5 por shard.
-          # Usamos shards de 20 MiB.
-          CHUNK_SIZE=$((20 * 1024 * 1024))
-
-          mkdir -p chunks
+          echo "Chunk size: ${CHUNK_SIZE} bytes"
 
           split \
             -b "${CHUNK_SIZE}" \
@@ -169,11 +119,17 @@ jobs:
             chunks/part_
 
           BLOCK_LIST="["
-
           FIRST=1
+          PARTSEQ=0
 
           for PART in chunks/part_*; do
             MD5="$(md5sum "${PART}" | awk '{print $1}')"
+
+            echo "=========================================="
+            echo "Chunk: ${PARTSEQ}"
+            echo "File : ${PART}"
+            echo "MD5  : ${MD5}"
+            echo "=========================================="
 
             if [[ "${FIRST}" -eq 1 ]]; then
               FIRST=0
@@ -183,126 +139,183 @@ jobs:
 
             BLOCK_LIST+="\"${MD5}\""
 
-            echo "Shard: ${PART}"
-            echo "MD5:   ${MD5}"
+            PARTSEQ=$((PARTSEQ + 1))
           done
 
           BLOCK_LIST+="]"
 
-          echo "BLOCK_LIST=${BLOCK_LIST}" >> "$GITHUB_ENV"
           echo "FILE_SIZE=${FILE_SIZE}" >> "$GITHUB_ENV"
+          echo "BLOCK_LIST=${BLOCK_LIST}" >> "$GITHUB_ENV"
 
-          echo "Block list:"
-          echo "${BLOCK_LIST}"
+          echo "Block list: ${BLOCK_LIST}"
 
-      - name: TeraBox pre-create
+      - name: Pre-create file in TeraBox
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Solicitando upload ID..."
+          PRECREATE_URL="https://www.terabox.com/api/precreate"
 
-          PRECREATE_RESPONSE="$(
-            curl --fail-with-body \
+          echo "Ejecutando precreate..."
+
+          RESPONSE="$(
+            curl \
               --silent \
               --show-error \
+              --fail-with-body \
               --request POST \
+              --cookie "${TERABOX_COOKIE}" \
+              --header "User-Agent: netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044" \
+              --header "Origin: https://www.terabox.com" \
+              --header "Referer: https://www.terabox.com/main" \
+              --header "Content-Type: application/x-www-form-urlencoded" \
               --data-urlencode "path=${REMOTE_PATH}" \
               --data-urlencode "size=${FILE_SIZE}" \
               --data-urlencode "isdir=0" \
               --data-urlencode "autoinit=1" \
+              --data-urlencode "target_path=$(dirname "${REMOTE_PATH}")" \
               --data-urlencode "block_list=${BLOCK_LIST}" \
-              "${TERABOX_API_DOMAIN}/openapi/api/precreate?access_tokens=${TERABOX_ACCESS_TOKEN}"
+              --data-urlencode "app_id=250528" \
+              --data-urlencode "web=1" \
+              --data-urlencode "channel=dubox" \
+              --data-urlencode "clienttype=0" \
+              "${PRECREATE_URL}"
           )"
 
-          echo "Pre-create response:"
-          echo "${PRECREATE_RESPONSE}"
+          echo "Precreate response:"
+          echo "${RESPONSE}"
 
-          ERRNO="$(echo "${PRECREATE_RESPONSE}" | jq -r '.errno // -1')"
+          ERRNO="$(echo "${RESPONSE}" | jq -r '.errno // -999')"
 
           if [[ "${ERRNO}" != "0" ]]; then
-            echo "::error::TeraBox pre-create falló."
+            echo "::error::El precreate falló."
             exit 1
           fi
 
-          RETURN_TYPE="$(echo "${PRECREATE_RESPONSE}" | jq -r '.return_type // 1')"
+          UPLOAD_ID="$(echo "${RESPONSE}" | jq -r '.uploadid // empty')"
 
-          if [[ "${RETURN_TYPE}" == "2" ]]; then
-            echo "El archivo ya existe en TeraBox."
-            exit 0
-          fi
+          if [[ -z "${UPLOAD_ID}" ]]; then
+            RETURN_TYPE="$(echo "${RESPONSE}" | jq -r '.return_type // empty')"
 
-          UPLOAD_ID="$(echo "${PRECREATE_RESPONSE}" | jq -r '.uploadid')"
+            if [[ "${RETURN_TYPE}" == "2" ]]; then
+              echo "TeraBox indicó que el archivo ya existe."
+              exit 0
+            fi
 
-          if [[ -z "${UPLOAD_ID}" || "${UPLOAD_ID}" == "null" ]]; then
-            echo "::error::TeraBox no devolvió uploadid."
+            echo "::error::No se recibió uploadid."
             exit 1
           fi
 
           echo "UPLOAD_ID=${UPLOAD_ID}" >> "$GITHUB_ENV"
 
-      - name: Upload shards to TeraBox
+          echo "Upload ID: ${UPLOAD_ID}"
+
+      - name: Upload chunks in parallel
         shell: bash
         run: |
           set -euxo pipefail
 
-          INDEX=0
+          UPLOAD_HOST="https://c-jp.terabox.com"
+          MAX_PARALLEL=8
 
-          for PART in chunks/part_*; do
-            echo "=========================================================="
-            echo "Subiendo shard ${INDEX}"
-            echo "Archivo: ${PART}"
-            echo "=========================================================="
+          upload_chunk() {
+            local PART="$1"
+            local SEQ="$2"
+
+            echo "[$SEQ] Uploading ${PART}"
 
             RESPONSE="$(
-              curl --fail-with-body \
+              curl \
                 --silent \
                 --show-error \
+                --fail-with-body \
                 --request POST \
+                --cookie "${TERABOX_COOKIE}" \
+                --header "User-Agent: netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044" \
+                --header "Origin: https://www.terabox.com" \
+                --header "Referer: https://www.terabox.com/main" \
                 --form "file=@${PART}" \
-                "${TERABOX_UPLOAD_DOMAIN}/rest/2.0/pcs/superfile2?method=upload&app_id=250528&path=${REMOTE_PATH}&uploadid=${UPLOAD_ID}&partseq=${INDEX}&access_tokens=${TERABOX_ACCESS_TOKEN}"
+                "${UPLOAD_HOST}/rest/2.0/pcs/superfile2?method=upload&type=tmpfile&app_id=250528&path=$(printf '%s' "${REMOTE_PATH}" | jq -sRr @uri)&uploadid=${UPLOAD_ID}&partseq=${SEQ}"
             )"
 
-            echo "Upload response:"
-            echo "${RESPONSE}"
+            echo "[$SEQ] Response: ${RESPONSE}"
 
             ERROR_CODE="$(echo "${RESPONSE}" | jq -r '.error_code // 0')"
 
             if [[ "${ERROR_CODE}" != "0" ]]; then
-              echo "::error::Falló el upload del shard ${INDEX}."
-              exit 1
+              echo "::error::Falló el chunk ${SEQ}: ${RESPONSE}"
+              return 1
             fi
+          }
 
-            INDEX=$((INDEX + 1))
+          ACTIVE=0
+          SEQ=0
+          PIDS=()
+
+          for PART in chunks/part_*; do
+            upload_chunk "${PART}" "${SEQ}" &
+
+            PIDS+=("$!")
+            ACTIVE=$((ACTIVE + 1))
+            SEQ=$((SEQ + 1))
+
+            if [[ "${ACTIVE}" -ge "${MAX_PARALLEL}" ]]; then
+              for PID in "${PIDS[@]}"; do
+                wait "${PID}"
+              done
+
+              PIDS=()
+              ACTIVE=0
+            fi
           done
 
-      - name: Create file in TeraBox
+          for PID in "${PIDS[@]}"; do
+            wait "${PID}"
+          done
+
+          echo "Todos los chunks fueron subidos."
+
+      - name: Create final file in TeraBox
         shell: bash
         run: |
           set -euxo pipefail
 
+          CREATE_URL="https://www.terabox.com/api/create"
+
           echo "Finalizando archivo..."
 
-          CREATE_RESPONSE="$(
-            curl --fail-with-body \
+          RESPONSE="$(
+            curl \
               --silent \
               --show-error \
+              --fail-with-body \
               --request POST \
+              --cookie "${TERABOX_COOKIE}" \
+              --header "User-Agent: netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044" \
+              --header "Origin: https://www.terabox.com" \
+              --header "Referer: https://www.terabox.com/main" \
+              --header "Content-Type: application/x-www-form-urlencoded" \
               --data-urlencode "path=${REMOTE_PATH}" \
-              --data-urlencode "size=${FILE_SIZE}" \
               --data-urlencode "uploadid=${UPLOAD_ID}" \
+              --data-urlencode "target_path=$(dirname "${REMOTE_PATH}")/" \
+              --data-urlencode "size=${FILE_SIZE}" \
               --data-urlencode "block_list=${BLOCK_LIST}" \
               --data-urlencode "rtype=1" \
-              "${TERABOX_API_DOMAIN}/openapi/api/create?access_tokens=${TERABOX_ACCESS_TOKEN}"
+              --data-urlencode "isdir=0" \
+              --data-urlencode "app_id=250528" \
+              --data-urlencode "web=1" \
+              --data-urlencode "channel=dubox" \
+              --data-urlencode "clienttype=0" \
+              "${CREATE_URL}"
           )"
 
           echo "Create response:"
-          echo "${CREATE_RESPONSE}"
+          echo "${RESPONSE}"
 
-          ERRNO="$(echo "${CREATE_RESPONSE}" | jq -r '.errno // -1')"
+          ERRNO="$(echo "${RESPONSE}" | jq -r '.errno // -999')"
 
           if [[ "${ERRNO}" != "0" ]]; then
-            echo "::error::TeraBox no pudo crear/finalizar el archivo."
+            echo "::error::La creación final del archivo falló."
             exit 1
           fi
 
@@ -312,4 +325,15 @@ jobs:
           echo "Archivo local : ${DOWNLOADED_FILE}"
           echo "Archivo remoto: ${REMOTE_PATH}"
           echo "Tamaño        : ${FILE_SIZE} bytes"
+          echo "=========================================================="
+
+      - name: Show result
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=========================================================="
+          echo "Premium Upload completed successfully"
+          echo "File: ${DOWNLOADED_FILE}"
+          echo "Remote path: ${REMOTE_PATH}"
           echo "=========================================================="
