@@ -63,7 +63,7 @@ jobs:
           fi
 
       # ==========================================================
-      # DESCUBRIR ARCHIVOS DE H5AI
+      # DESCUBRIR ARCHIVOS H5AI
       # ==========================================================
 
       - name: Discover files from h5ai
@@ -97,7 +97,6 @@ jobs:
 
 
           class H5AIParser(HTMLParser):
-
               def __init__(self):
                   super().__init__()
 
@@ -112,7 +111,6 @@ jobs:
                   attrs = dict(attrs)
 
                   if tag == "li":
-
                       classes = set(
                           attrs.get("class", "").split()
                       )
@@ -123,7 +121,6 @@ jobs:
                           self.current_li_classes = set()
 
                   elif tag == "a":
-
                       href = attrs.get("href")
 
                       if not href:
@@ -136,7 +133,6 @@ jobs:
                           self.current_href = href
 
                   elif tag == "td":
-
                       classes = set(
                           attrs.get("class", "").split()
                       )
@@ -145,16 +141,13 @@ jobs:
                           self.in_fb_name = True
 
               def handle_endtag(self, tag):
-
                   if tag == "td":
                       self.in_fb_name = False
 
                   elif tag == "a":
-
                       href = self.current_href
 
                       if href:
-
                           href = href.strip()
 
                           if href not in ("", ".", "..", "../"):
@@ -175,13 +168,9 @@ jobs:
                                   self.folders.append(href)
 
                               else:
-                                  # h5ai fallback:
-                                  #
-                                  # terminado en /
-                                  # = carpeta
-                                  #
-                                  # cualquier otra cosa
-                                  # = archivo
+                                  # Fallback de h5ai:
+                                  # / terminado = carpeta
+                                  # cualquier otra cosa = archivo
 
                                   if href.endswith("/"):
                                       self.folders.append(href)
@@ -199,7 +188,6 @@ jobs:
 
 
           def fetch(url):
-
               print()
               print("=" * 80)
               print("GET:", url)
@@ -230,7 +218,6 @@ jobs:
 
 
           def is_html(content_type, body):
-
               if "html" in content_type.lower():
                   return True
 
@@ -243,8 +230,7 @@ jobs:
               )
 
 
-          def file_name(url):
-
+          def get_filename(url):
               path = urlparse(url).path.rstrip("/")
 
               if not path:
@@ -256,7 +242,6 @@ jobs:
 
 
           def crawl(directory_url, relative_path=""):
-
               directory_url = (
                   directory_url.rstrip("/") + "/"
               )
@@ -279,12 +264,11 @@ jobs:
                   return
 
               # --------------------------------------------------
-              # Si no devuelve HTML, tratarlo como archivo.
+              # Si no es HTML, es un archivo.
               # --------------------------------------------------
 
               if not is_html(content_type, body):
-
-                  name = file_name(directory_url)
+                  name = get_filename(directory_url)
 
                   if name:
                       relative_file = (
@@ -310,7 +294,6 @@ jobs:
               # --------------------------------------------------
 
               for href in parser.files:
-
                   full_url = urljoin(
                       directory_url,
                       href
@@ -321,7 +304,7 @@ jobs:
                   ).path:
                       continue
 
-                  name = file_name(full_url)
+                  name = get_filename(full_url)
 
                   if not name:
                       continue
@@ -339,12 +322,7 @@ jobs:
               # --------------------------------------------------
 
               for href in parser.folders:
-
-                  if href in (
-                      ".",
-                      "..",
-                      "../"
-                  ):
+                  if href in (".", "..", "../"):
                       continue
 
                   full_url = urljoin(
@@ -383,12 +361,11 @@ jobs:
           # ------------------------------------------------------
 
           if not parsed.path.endswith("/"):
-              name = file_name(INPUT_URL)
+              name = get_filename(INPUT_URL)
 
               if not name:
                   raise SystemExit(
-                      "No se pudo determinar "
-                      "el nombre del archivo."
+                      "No se pudo determinar el nombre del archivo."
                   )
 
               discovered_files[
@@ -447,7 +424,7 @@ jobs:
           cat files.tsv
 
       # ==========================================================
-      # CREAR LISTA DE ARIA2
+      # GENERAR LISTA ARIA2
       # ==========================================================
 
       - name: Build aria2 download list
@@ -461,13 +438,8 @@ jobs:
 
             [[ -z "${RELATIVE_PATH}" ]] && continue
 
-            DIRECTORY="$(
-              dirname "${RELATIVE_PATH}"
-            )"
-
-            FILENAME="$(
-              basename "${RELATIVE_PATH}"
-            )"
+            DIRECTORY="$(dirname "${RELATIVE_PATH}")"
+            FILENAME="$(basename "${RELATIVE_PATH}")"
 
             echo "${URL}" >> aria2.txt
 
@@ -482,14 +454,15 @@ jobs:
 
           done < files.tsv
 
+          echo
           echo "=========================================================="
-          echo "aria2.txt"
+          echo "ARIA2 INPUT"
           echo "=========================================================="
 
           cat aria2.txt
 
       # ==========================================================
-      # DESCARGAR TODOS LOS ARCHIVOS
+      # DESCARGAR
       # ==========================================================
 
       - name: Download files with aria2
@@ -520,7 +493,7 @@ jobs:
             -printf '  %P\n'
 
       # ==========================================================
-      # DIRECTORIO REMOTO BASE
+      # DESTINO TERABOX
       # ==========================================================
 
       - name: Build TeraBox destination
@@ -542,15 +515,9 @@ jobs:
           URL_PATH="${URL_PATH%%\#*}"
 
           if [[ "${URL_PATH}" == */ ]]; then
-
             URL_PATH="${URL_PATH%/}"
-
           else
-
-            URL_PATH="$(
-              dirname "${URL_PATH}"
-            )"
-
+            URL_PATH="$(dirname "${URL_PATH}")"
           fi
 
           if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
@@ -559,17 +526,16 @@ jobs:
             REMOTE_DIR="/Archive${URL_PATH}"
           fi
 
-          echo "REMOTE_DIR=${REMOTE_DIR}" \
-            >> "$GITHUB_ENV"
+          echo "REMOTE_DIR=${REMOTE_DIR}" >> "$GITHUB_ENV"
 
           echo
           echo "=========================================================="
-          echo "DIRECTORIO TERABOX"
+          echo "TERABOX DESTINATION"
           echo "=========================================================="
           echo "${REMOTE_DIR}"
 
       # ==========================================================
-      # CREAR CARPETAS TERABOX
+      # CREAR DIRECTORIOS REMOTOS
       # ==========================================================
 
       - name: Create TeraBox directories
@@ -577,9 +543,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # IMPORTANTE:
-          # remote_dirs.txt es un ARCHIVO.
-          # Antes estaba mal definido como directorio.
           rm -f remote_dirs.txt
           touch remote_dirs.txt
 
@@ -587,9 +550,7 @@ jobs:
 
             [[ -z "${RELATIVE_PATH}" ]] && continue
 
-            DIRECTORY="$(
-              dirname "${RELATIVE_PATH}"
-            )"
+            DIRECTORY="$(dirname "${RELATIVE_PATH}")"
 
             [[ "${DIRECTORY}" == "." ]] && continue
 
@@ -620,7 +581,7 @@ jobs:
 
           echo
           echo "=========================================================="
-          echo "DIRECTORIOS TERABOX NECESARIOS"
+          echo "DIRECTORIOS A CREAR"
           echo "=========================================================="
 
           if [[ -s remote_dirs.txt ]]; then
@@ -628,12 +589,6 @@ jobs:
           else
             echo "No hay subdirectorios."
           fi
-
-          # ------------------------------------------------------
-          # Crear carpetas.
-          #
-          # Si ya existen, no interrumpimos el workflow.
-          # ------------------------------------------------------
 
           while IFS= read -r DIRECTORY; do
 
@@ -673,21 +628,15 @@ jobs:
             )"
 
             if [[ "${ERRNO}" == "0" ]]; then
-
-              echo "Carpeta creada/verificada correctamente."
-
+              echo "OK"
             else
-
-              echo "Aviso:"
-              echo "La carpeta probablemente ya existe."
-              echo "errno=${ERRNO}"
-
+              echo "La carpeta probablemente ya existe. errno=${ERRNO}"
             fi
 
           done < remote_dirs.txt
 
       # ==========================================================
-      # SUBIR ARCHIVO
+      # SUBIR TODOS LOS ARCHIVOS
       # ==========================================================
 
       - name: Upload files to TeraBox
@@ -714,25 +663,27 @@ jobs:
 
             echo
             echo "=========================================================="
-            echo "SUBIENDO"
+            echo "SUBIENDO ARCHIVO"
             echo "=========================================================="
             echo "Local : ${FILE}"
             echo "Remote: ${REMOTE_PATH}"
             echo "=========================================================="
 
             local FILE_SIZE
-            FILE_SIZE="$(
-              stat -c '%s' "${FILE}"
-            )"
+            FILE_SIZE="$(stat -c '%s' "${FILE}")"
+
+            # AQUÍ ESTABA EL ERROR:
+            # Era:
+            # local CHUNK_SIZE=$(20 * 1024 * 1024)
+            #
+            # Ahora es aritmética Bash correcta.
+            local CHUNK_SIZE=$((20 * 1024 * 1024))
 
             local CHUNK_DIR
-            CHUNK_DIR="$(
-              mktemp -d
-            )"
+            CHUNK_DIR="$(mktemp -d)"
 
-            local CHUNK_SIZE=$(
-              20 * 1024 * 1024
-            )
+            echo "Tamaño archivo : ${FILE_SIZE} bytes"
+            echo "Tamaño chunk   : ${CHUNK_SIZE} bytes"
 
             split \
               -b "${CHUNK_SIZE}" \
@@ -761,15 +712,12 @@ jobs:
 
               BLOCK_LIST+="\"${MD5}\""
 
-              PARTSEQ=$(
-                (PARTSEQ + 1)
-              )
+              PARTSEQ=$((PARTSEQ + 1))
 
             done
 
             BLOCK_LIST+="]"
 
-            echo "Tamaño: ${FILE_SIZE}"
             echo "Chunks: ${PARTSEQ}"
 
             # ----------------------------------------------------
@@ -803,7 +751,7 @@ jobs:
                 "https://www.terabox.com/api/precreate"
             )"
 
-            echo "Precreate:"
+            echo "Precreate response:"
             echo "${RESPONSE}"
 
             local ERRNO
@@ -813,12 +761,9 @@ jobs:
             )"
 
             if [[ "${ERRNO}" != "0" ]]; then
-
-              echo "::error::Precreate falló."
+              echo "::error::Precreate falló para ${FILE_NAME}"
               rm -rf "${CHUNK_DIR}"
-
               return 1
-
             fi
 
             local UPLOAD_ID
@@ -836,26 +781,20 @@ jobs:
               )"
 
               if [[ "${RETURN_TYPE}" == "2" ]]; then
-
                 echo "El archivo ya existe:"
                 echo "${REMOTE_PATH}"
 
                 rm -rf "${CHUNK_DIR}"
-
                 return 0
-
               fi
 
               echo "::error::No se recibió uploadid."
-
               rm -rf "${CHUNK_DIR}"
-
               return 1
-
             fi
 
             # ----------------------------------------------------
-            # UPLOAD CHUNKS
+            # SUBIR CHUNKS EN PARALELO
             # ----------------------------------------------------
 
             upload_chunk() {
@@ -888,15 +827,10 @@ jobs:
               )"
 
               if [[ "${ERROR_CODE}" != "0" ]]; then
-
-                echo "::error::Falló el chunk ${SEQ}."
-
+                echo "::error::Falló chunk ${SEQ} de ${FILE_NAME}"
                 echo "${UPLOAD_RESPONSE}"
-
                 return 1
-
               fi
-
             }
 
             local ACTIVE=0
@@ -911,13 +845,8 @@ jobs:
 
               PIDS+=("$!")
 
-              ACTIVE=$(
-                (ACTIVE + 1)
-              )
-
-              SEQ=$(
-                (SEQ + 1)
-              )
+              ACTIVE=$((ACTIVE + 1))
+              SEQ=$((SEQ + 1))
 
               if [[ "${ACTIVE}" -ge "${MAX_PARALLEL}" ]]; then
 
@@ -937,7 +866,7 @@ jobs:
             done
 
             # ----------------------------------------------------
-            # CREATE FINAL
+            # CREATE
             # ----------------------------------------------------
 
             echo "Finalizando ${FILE_NAME}..."
@@ -967,7 +896,7 @@ jobs:
                 "https://www.terabox.com/api/create"
             )"
 
-            echo "Create:"
+            echo "Create response:"
             echo "${RESPONSE}"
 
             ERRNO="$(
@@ -976,13 +905,9 @@ jobs:
             )"
 
             if [[ "${ERRNO}" != "0" ]]; then
-
-              echo "::error::Create falló."
-
+              echo "::error::Create falló para ${FILE_NAME}"
               rm -rf "${CHUNK_DIR}"
-
               return 1
-
             fi
 
             echo
@@ -997,7 +922,7 @@ jobs:
 
 
           # ------------------------------------------------------
-          # SUBIR TODOS LOS ARCHIVOS
+          # PROCESAR TODOS LOS ARCHIVOS
           # ------------------------------------------------------
 
           while IFS=$'\t' read -r RELATIVE_PATH URL; do
@@ -1007,12 +932,9 @@ jobs:
             FILE="downloaded/${RELATIVE_PATH}"
 
             if [[ ! -f "${FILE}" ]]; then
-
-              echo "::error::No existe:"
+              echo "::error::No existe el archivo descargado:"
               echo "${FILE}"
-
               exit 1
-
             fi
 
             upload_file \
