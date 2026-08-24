@@ -8,11 +8,6 @@ on:
         required: true
         type: string
 
-      remote_path:
-        description: "Ruta de destino en TeraBox, por ejemplo /usuarios/admin"
-        required: true
-        type: string
-
 jobs:
   upload-to-terabox:
     name: Download and upload file
@@ -44,11 +39,6 @@ jobs:
 
           if [[ -z "${{ inputs.download_url }}" ]]; then
             echo "::error::No se proporcionó una URL de descarga."
-            exit 1
-          fi
-
-          if [[ -z "${{ inputs.remote_path }}" ]]; then
-            echo "::error::No se proporcionó una ruta remota."
             exit 1
           fi
 
@@ -120,17 +110,44 @@ jobs:
 
           echo "DOWNLOADED_FILE=downloaded/${FILE_NAME}" >> "$GITHUB_ENV"
 
+      - name: Build TeraBox destination path
+        shell: bash
+        run: |
+          set -e
+
+          URL="${{ inputs.download_url }}"
+
+          # Extraer solamente el path de la URL:
+          # https://example.com/foo/bar/file.zip
+          # -> /foo/bar/file.zip
+          URL_PATH="$(python3 -c 'from urllib.parse import urlparse; import os,sys; print(urlparse(sys.argv[1]).path)' "$URL")"
+
+          if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
+            echo "::error::No se pudo obtener la ruta desde la URL."
+            exit 1
+          fi
+
+          # TeraBox:
+          # /Archive + path de la URL
+          REMOTE_PATH="/Archive${URL_PATH}"
+
+          echo "URL: ${URL}"
+          echo "URL path: ${URL_PATH}"
+          echo "Destino TeraBox: ${REMOTE_PATH}"
+
+          echo "REMOTE_PATH=${REMOTE_PATH}" >> "$GITHUB_ENV"
+
       - name: Upload file to TeraBox
         shell: bash
         run: |
           set -e
 
           echo "Archivo local: ${DOWNLOADED_FILE}"
-          echo "Destino remoto: ${{ inputs.remote_path }}"
+          echo "Destino remoto: ${REMOTE_PATH}"
 
           ./tbc put \
             "${DOWNLOADED_FILE}" \
-            "${{ inputs.remote_path }}"
+            "${REMOTE_PATH}"
 
       - name: Show result
         shell: bash
@@ -138,5 +155,5 @@ jobs:
           echo "========================================"
           echo "Upload completed successfully"
           echo "File: ${DOWNLOADED_FILE}"
-          echo "Remote path: ${{ inputs.remote_path }}"
+          echo "Remote path: ${REMOTE_PATH}"
           echo "========================================"
