@@ -10,35 +10,32 @@ on:
 
 jobs:
   upload-to-terabox:
-    name: Premium Parallel Download and Upload
+    name: Official TeraBox Open Platform Upload
     runs-on: ubuntu-latest
 
     env:
-      TERABOX_COOKIE: ${{ secrets.TERABOX_COOKIE }}
+      TERABOX_ACCESS_TOKEN: ${{ secrets.TERABOX_ACCESS_TOKEN }}
 
     steps:
-      - name: System Update and Install Dependencies
+      - name: Install dependencies
         shell: bash
         run: |
-          set -ex
+          set -euxo pipefail
 
           sudo apt-get update -y
-          # Instalamos aria2 (para descargas) y dependencias de Python para la subida
-          sudo apt-get install -y -V aria2 python3-pip python3-setuptools
-
-          # Instalamos requests con verbosidad máxima
-          pip3 install -v requests
+          sudo apt-get install -y aria2 jq curl
 
           aria2c --version
-          python3 --version
+          curl --version
+          jq --version
 
-      - name: Check inputs and Environment
+      - name: Check inputs
         shell: bash
         run: |
-          set -ex
+          set -euxo pipefail
 
-          if [[ -z "${TERABOX_COOKIE}" ]]; then
-            echo "::error::El secret TERABOX_COOKIE no está configurado."
+          if [[ -z "${TERABOX_ACCESS_TOKEN}" ]]; then
+            echo "::error::El secret TERABOX_ACCESS_TOKEN no está configurado."
             exit 1
           fi
 
@@ -47,229 +44,272 @@ jobs:
             exit 1
           fi
 
-      - name: Download requested file with aria2 (Debug Mode)
+      - name: Download file with aria2
         shell: bash
         run: |
-          set -ex
+          set -euxo pipefail
 
-          mkdir -pv downloaded
+          mkdir -p downloaded
 
           URL="${{ inputs.download_url }}"
+
           FILE_NAME="$(basename "${URL%%\?*}")"
 
           if [[ -z "${FILE_NAME}" || "${FILE_NAME}" == "/" || "${FILE_NAME}" == "." ]]; then
-            echo "::error::No se pudo determinar el nombre del archivo desde la URL."
+            echo "::error::No se pudo determinar el nombre del archivo."
             exit 1
           fi
 
-          echo "Descargando: ${URL}"
+          echo "URL: ${URL}"
           echo "Archivo: ${FILE_NAME}"
 
-          # --console-log-level=debug escupe todos los detalles de conexión y fragmentos de aria2
           aria2c \
             -x 16 \
             -s 16 \
-            --console-log-level=debug \
+            --console-log-level=notice \
             --dir=downloaded \
             --out="${FILE_NAME}" \
             "${URL}"
 
           echo "DOWNLOADED_FILE=downloaded/${FILE_NAME}" >> "$GITHUB_ENV"
 
-      - name: Build TeraBox destination path
+      - name: Get TeraBox API domains
         shell: bash
         run: |
-          set -ex
+          set -euxo pipefail
 
-          URL="${{ inputs.download_url }}"
-          URL_PATH="$(python3 -c 'from urllib.parse import urlparse; import os,sys; print(urlparse(sys.argv[1]).path)' "$URL")"
+          echo "Obteniendo información del access_token..."
 
-          if [[ -z "${URL_PATH}" || "${URL_PATH}" == "/" ]]; then
-            echo "::error::No se pudo obtener la ruta desde la URL."
+          TOKEN_INFO="$(
+            curl --fail-with-body \
+              --silent \
+              --show-error \
+              --request POST \
+              --form "access_token=${TERABOX_ACCESS_TOKEN}" \
+              "https://www.terabox.com/oauth/tokeninfo"
+          )"
+
+          echo "Token information received."
+
+          ERRNO="$(echo "${TOKEN_INFO}" | jq -r '.errno // -1')"
+
+          if [[ "${ERRNO}" != "0" ]]; then
+            echo "::error::TeraBox rechazó el access_token."
+            echo "${TOKEN_INFO}"
             exit 1
           fi
 
-          REMOTE_PATH="/Archive${URL_PATH}"
-          
-          echo "URL: ${URL}"
-          echo "URL path: ${URL_PATH}"
-          echo "Destino TeraBox: ${REMOTE_PATH}"
+          API_DOMAIN="$(echo "${TOKEN_INFO}" | jq -r '.data.api_domain')"
+          UPLOAD_DOMAIN="$(echo "${TOKEN_INFO}" | jq -r '.data.upload_domain')"
+          CLIENT_ID="$(echo "${TOKEN_INFO}" | jq -r '.data.client_id')"
 
+          if [[ -z "${API_DOMAIN}" || "${API_DOMAIN}" == "null" ]]; then
+            echo "::error::TeraBox no devolvió api_domain."
+            exit 1
+          fi
+
+          if [[ -z "${UPLOAD_DOMAIN}" || "${UPLOAD_DOMAIN}" == "null" ]]; then
+            echo "::error::TeraBox no devolvió upload_domain."
+            exit 1
+          fi
+
+          echo "API domain: ${API_DOMAIN}"
+          echo "Upload domain: ${UPLOAD_DOMAIN}"
+          echo "Client ID: ${CLIENT_ID}"
+
+          echo "TERABOX_API_DOMAIN=${API_DOMAIN}" >> "$GITHUB_ENV"
+          echo "TERABOX_UPLOAD_DOMAIN=${UPLOAD_DOMAIN}" >> "$GITHUB_ENV"
+          echo "TERABOX_CLIENT_ID=${CLIENT_ID}" >> "$GITHUB_ENV"
+
+      - name: Build TeraBox destination path
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          FILE_NAME="$(basename "${DOWNLOADED_FILE}")"
+
+          # La Open Platform de TeraBox asigna los archivos
+          # a un espacio propio de la aplicación.
+          #
+          # Cambia "TeraBox GitHub Actions" por el nombre
+          # de tu aplicación registrada en TeraBox.
+          APP_NAME="TeraBox GitHub Actions"
+
+          REMOTE_DIR="/From: Other Applications/${APP_NAME}-"
+          REMOTE_PATH="${REMOTE_DIR}/${FILE_NAME}"
+
+          echo "Aplicación: ${APP_NAME}"
+          echo "Directorio remoto: ${REMOTE_DIR}"
+          echo "Archivo remoto: ${REMOTE_PATH}"
+
+          echo "REMOTE_DIR=${REMOTE_DIR}" >> "$GITHUB_ENV"
           echo "REMOTE_PATH=${REMOTE_PATH}" >> "$GITHUB_ENV"
 
-      - name: Upload file via Custom Premium Python Script (Max Verbose)
+      - name: Calculate file information
         shell: bash
         run: |
-          set -ex
-          
-          # Generamos al vuelo el script Python que subirá el archivo
-          cat << 'EOF' > upload_premium.py
-          import os
-          import sys
-          import json
-          import hashlib
-          import requests
-          import logging
-          import http.client
-          import concurrent.futures
-          import urllib.parse
+          set -euxo pipefail
 
-          # =================================================================
-          # 1. ACTIVACIÓN DE MÁXIMO VERBOSITY (DEBUGLEVEL = 1)
-          # =================================================================
-          http.client.HTTPConnection.debuglevel = 1
-          logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
-          requests_log = logging.getLogger("requests.packages.urllib3")
-          requests_log.setLevel(logging.DEBUG)
-          requests_log.propagate = True
+          FILE_SIZE="$(stat -c '%s' "${DOWNLOADED_FILE}")"
 
-          # =================================================================
-          # 2. CONFIGURACIÓN PREMIUM
-          # =================================================================
-          # Los usuarios premium de TeraBox pueden usar chunks más grandes y múltiples hilos
-          CHUNK_SIZE = 20 * 1024 * 1024  # 20 MB por bloque
-          MAX_WORKERS = 8                # 8 Conexiones concurrentes
-          
-          COOKIE_STRING = os.environ.get('TERABOX_COOKIE', '')
-          LOCAL_FILE = os.environ.get('DOWNLOADED_FILE', '')
-          REMOTE_PATH = os.environ.get('REMOTE_PATH', '')
+          echo "Archivo: ${DOWNLOADED_FILE}"
+          echo "Tamaño: ${FILE_SIZE} bytes"
 
-          # Falsificamos el User-Agent para identificarnos como la App Nativa de PC (Premium)
-          HEADERS = {
-              'User-Agent': 'netdisk;P2SP;3.0.0.8;netdisk;11.4.5.1;PC;PC-Windows;10.0.19044',
-              'Cookie': COOKIE_STRING,
-              'Accept': 'application/json'
-          }
+          # TeraBox requiere MD5 por shard.
+          # Usamos shards de 20 MiB.
+          CHUNK_SIZE=$((20 * 1024 * 1024))
 
-          def get_file_chunks_md5(file_path):
-              logging.debug(f"Calculando MD5 en bloques de {CHUNK_SIZE/1024/1024}MB...")
-              md5_list = []
-              file_size = os.path.getsize(file_path)
-              with open(file_path, 'rb') as f:
-                  while True:
-                      data = f.read(CHUNK_SIZE)
-                      if not data:
-                          break
-                      chunk_md5 = hashlib.md5(data).hexdigest()
-                      md5_list.append(chunk_md5)
-                      logging.debug(f"Chunk MD5 calculado: {chunk_md5}")
-              return md5_list, file_size
+          mkdir -p chunks
 
-          def main():
-              logging.info(f"Iniciando subida Premium -> Archivo: {LOCAL_FILE} | Destino: {REMOTE_PATH}")
-              
-              if not os.path.exists(LOCAL_FILE):
-                  logging.error("El archivo no existe.")
-                  sys.exit(1)
+          split \
+            -b "${CHUNK_SIZE}" \
+            -d \
+            -a 6 \
+            "${DOWNLOADED_FILE}" \
+            chunks/part_
 
-              md5_list, file_size = get_file_chunks_md5(LOCAL_FILE)
-              
-              # La API de TeraBox/Baidu requiere codificar el path
-              encoded_path = urllib.parse.quote(REMOTE_PATH)
+          BLOCK_LIST="["
 
-              session = requests.Session()
-              session.headers.update(HEADERS)
+          FIRST=1
 
-              # ---------------------------------------------------------------
-              # PASO 1: PRE-CREATE (Solicitar ID de subida al servidor)
-              # ---------------------------------------------------------------
-              logging.info("PASO 1: Ejecutando /api/precreate...")
-              precreate_url = f"https://www.terabox.com/api/precreate?clienttype=8&app_id=250528&web=1"
-              payload = {
-                  "path": REMOTE_PATH,
-                  "size": str(file_size),
-                  "isdir": "0",
-                  "autoinit": "1",
-                  "block_list": json.dumps(md5_list)
-              }
-              
-              logging.debug(f"Payload Precreate: {payload}")
-              resp = session.post(precreate_url, data=payload)
-              logging.debug(f"Respuesta Precreate: {resp.text}")
-              
-              data = resp.json()
-              if data.get('errno') != 0:
-                  # Si errno es 2, significa que el archivo ya existe o se subió instantáneamente (RapidUpload)
-                  if data.get('errno') == 2 or data.get('errno') == -8:
-                     logging.info("Archivo ya existe o RapidUpload exitoso.")
-                     sys.exit(0)
-                  else:
-                     logging.error(f"Error en precreate: {data}")
-                     sys.exit(1)
+          for PART in chunks/part_*; do
+            MD5="$(md5sum "${PART}" | awk '{print $1}')"
 
-              uploadid = data.get('uploadid')
-              logging.info(f"Upload ID obtenido: {uploadid}")
+            if [[ "${FIRST}" -eq 1 ]]; then
+              FIRST=0
+            else
+              BLOCK_LIST+=","
+            fi
 
-              # ---------------------------------------------------------------
-              # PASO 2: UPLOAD CHUNKS (Concurrencia Premium)
-              # ---------------------------------------------------------------
-              logging.info("PASO 2: Subiendo chunks concurrentemente...")
-              
-              def upload_chunk(seq, chunk_data):
-                  upload_url = f"https://c3.terabox.com/rest/2.0/pcs/superfile2?method=upload&app_id=250528&path={encoded_path}&uploadid={uploadid}&partseq={seq}"
-                  logging.debug(f"Subiendo chunk {seq}...")
-                  files = {'file': chunk_data}
-                  r = session.post(upload_url, files=files)
-                  logging.debug(f"Respuesta Chunk {seq}: {r.text}")
-                  return r.json()
+            BLOCK_LIST+="\"${MD5}\""
 
-              futures = []
-              with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                  with open(LOCAL_FILE, 'rb') as f:
-                      seq = 0
-                      while True:
-                          data = f.read(CHUNK_SIZE)
-                          if not data:
-                              break
-                          # Lanzamos los hilos
-                          futures.append(executor.submit(upload_chunk, seq, data))
-                          seq += 1
+            echo "Shard: ${PART}"
+            echo "MD5:   ${MD5}"
+          done
 
-              for future in concurrent.futures.as_completed(futures):
-                  try:
-                      res = future.result()
-                      if res.get('error_code'):
-                         logging.error(f"Error en chunk: {res}")
-                         sys.exit(1)
-                  except Exception as e:
-                      logging.error(f"Excepción en subida de chunk: {e}")
-                      sys.exit(1)
+          BLOCK_LIST+="]"
 
-              # ---------------------------------------------------------------
-              # PASO 3: CREATE (Finalizar y armar el archivo)
-              # ---------------------------------------------------------------
-              logging.info("PASO 3: Ejecutando /api/create para consolidar el archivo...")
-              create_url = f"https://www.terabox.com/api/create?clienttype=8&app_id=250528&web=1"
-              create_payload = {
-                  "path": REMOTE_PATH,
-                  "size": str(file_size),
-                  "isdir": "0",
-                  "block_list": json.dumps(md5_list),
-                  "uploadid": uploadid
-              }
-              resp_create = session.post(create_url, data=create_payload)
-              logging.debug(f"Respuesta Create: {resp_create.text}")
-              
-              res_data = resp_create.json()
-              if res_data.get('errno') == 0:
-                  logging.info("¡SUBIDA COMPLETADA CON ÉXITO!")
-              else:
-                  logging.error(f"Error al finalizar (Create): {res_data}")
-                  sys.exit(1)
+          echo "BLOCK_LIST=${BLOCK_LIST}" >> "$GITHUB_ENV"
+          echo "FILE_SIZE=${FILE_SIZE}" >> "$GITHUB_ENV"
 
-          if __name__ == '__main__':
-              main()
-          EOF
+          echo "Block list:"
+          echo "${BLOCK_LIST}"
 
-          # Ejecutamos el script Python forzando verbosidad en el intérprete
-          python3 -v upload_premium.py
-
-      - name: Show result
+      - name: TeraBox pre-create
         shell: bash
         run: |
-          set -ex
+          set -euxo pipefail
+
+          echo "Solicitando upload ID..."
+
+          PRECREATE_RESPONSE="$(
+            curl --fail-with-body \
+              --silent \
+              --show-error \
+              --request POST \
+              --data-urlencode "path=${REMOTE_PATH}" \
+              --data-urlencode "size=${FILE_SIZE}" \
+              --data-urlencode "isdir=0" \
+              --data-urlencode "autoinit=1" \
+              --data-urlencode "block_list=${BLOCK_LIST}" \
+              "${TERABOX_API_DOMAIN}/openapi/api/precreate?access_tokens=${TERABOX_ACCESS_TOKEN}"
+          )"
+
+          echo "Pre-create response:"
+          echo "${PRECREATE_RESPONSE}"
+
+          ERRNO="$(echo "${PRECREATE_RESPONSE}" | jq -r '.errno // -1')"
+
+          if [[ "${ERRNO}" != "0" ]]; then
+            echo "::error::TeraBox pre-create falló."
+            exit 1
+          fi
+
+          RETURN_TYPE="$(echo "${PRECREATE_RESPONSE}" | jq -r '.return_type // 1')"
+
+          if [[ "${RETURN_TYPE}" == "2" ]]; then
+            echo "El archivo ya existe en TeraBox."
+            exit 0
+          fi
+
+          UPLOAD_ID="$(echo "${PRECREATE_RESPONSE}" | jq -r '.uploadid')"
+
+          if [[ -z "${UPLOAD_ID}" || "${UPLOAD_ID}" == "null" ]]; then
+            echo "::error::TeraBox no devolvió uploadid."
+            exit 1
+          fi
+
+          echo "UPLOAD_ID=${UPLOAD_ID}" >> "$GITHUB_ENV"
+
+      - name: Upload shards to TeraBox
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          INDEX=0
+
+          for PART in chunks/part_*; do
+            echo "=========================================================="
+            echo "Subiendo shard ${INDEX}"
+            echo "Archivo: ${PART}"
+            echo "=========================================================="
+
+            RESPONSE="$(
+              curl --fail-with-body \
+                --silent \
+                --show-error \
+                --request POST \
+                --form "file=@${PART}" \
+                "${TERABOX_UPLOAD_DOMAIN}/rest/2.0/pcs/superfile2?method=upload&app_id=250528&path=${REMOTE_PATH}&uploadid=${UPLOAD_ID}&partseq=${INDEX}&access_tokens=${TERABOX_ACCESS_TOKEN}"
+            )"
+
+            echo "Upload response:"
+            echo "${RESPONSE}"
+
+            ERROR_CODE="$(echo "${RESPONSE}" | jq -r '.error_code // 0')"
+
+            if [[ "${ERROR_CODE}" != "0" ]]; then
+              echo "::error::Falló el upload del shard ${INDEX}."
+              exit 1
+            fi
+
+            INDEX=$((INDEX + 1))
+          done
+
+      - name: Create file in TeraBox
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Finalizando archivo..."
+
+          CREATE_RESPONSE="$(
+            curl --fail-with-body \
+              --silent \
+              --show-error \
+              --request POST \
+              --data-urlencode "path=${REMOTE_PATH}" \
+              --data-urlencode "size=${FILE_SIZE}" \
+              --data-urlencode "uploadid=${UPLOAD_ID}" \
+              --data-urlencode "block_list=${BLOCK_LIST}" \
+              --data-urlencode "rtype=1" \
+              "${TERABOX_API_DOMAIN}/openapi/api/create?access_tokens=${TERABOX_ACCESS_TOKEN}"
+          )"
+
+          echo "Create response:"
+          echo "${CREATE_RESPONSE}"
+
+          ERRNO="$(echo "${CREATE_RESPONSE}" | jq -r '.errno // -1')"
+
+          if [[ "${ERRNO}" != "0" ]]; then
+            echo "::error::TeraBox no pudo crear/finalizar el archivo."
+            exit 1
+          fi
+
           echo "=========================================================="
-          echo "Premium Upload completed successfully"
-          echo "File: ${DOWNLOADED_FILE}"
-          echo "Remote path: ${REMOTE_PATH}"
+          echo "¡SUBIDA COMPLETADA CON ÉXITO!"
+          echo "=========================================================="
+          echo "Archivo local : ${DOWNLOADED_FILE}"
+          echo "Archivo remoto: ${REMOTE_PATH}"
+          echo "Tamaño        : ${FILE_SIZE} bytes"
           echo "=========================================================="
